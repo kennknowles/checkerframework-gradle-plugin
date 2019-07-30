@@ -69,28 +69,31 @@ final class CheckerFrameworkPlugin implements Plugin<Project> {
 
             project.tasks.withType(AbstractCompile).all { compile ->
 
-              // find the right delombok task
-              def delombokTask = delombokTasks.find { task ->
+              if (isNotTestTask(compile, userConfig)) {
 
-                if (task.name.endsWith("delombok")) {
-                  // special-case the main compile task because its just named "compileJava"
-                  // without anything else
-                  compile.name.equals("compileJava")
-                } else {
-                  // "delombok" is 8 characters.
-                  compile.name.contains(task.name.substring(8))
+                // find the right delombok task
+                def delombokTask = delombokTasks.find { task ->
+
+                  if (task.name.endsWith("delombok")) {
+                    // special-case the main compile task because its just named "compileJava"
+                    // without anything else
+                    compile.name.equals("compileJava")
+                  } else {
+                    // "delombok" is 8 characters.
+                    compile.name.contains(task.name.substring(8))
+                  }
                 }
-              }
 
-              // delombokTask can still be null; for example, if the code contains a compileScala task
-              if (delombokTask != null) {
+                // delombokTask can still be null; for example, if the code contains a compileScala task
+                if (delombokTask != null) {
 
-                // the lombok plugin's default formatting is pretty-printing, without the @Generated annotations
-                // that we need to recognize lombok'd code
-                delombokTask.format.put('generated', 'generate')
+                  // the lombok plugin's default formatting is pretty-printing, without the @Generated annotations
+                  // that we need to recognize lombok'd code
+                  delombokTask.format.put('generated', 'generate')
 
-                compile.dependsOn(delombokTask)
-                compile.setSource(delombokTask.target.getAsFile().get())
+                  compile.dependsOn(delombokTask)
+                  compile.setSource(delombokTask.target.getAsFile().get())
+                }
               }
             }
           }
@@ -178,7 +181,7 @@ final class CheckerFrameworkPlugin implements Plugin<Project> {
 
 
       project.tasks.withType(AbstractCompile).all { compile ->
-        if (compile.hasProperty('options') && (!userConfig.excludeTests || !compile.name.toLowerCase().contains("test"))) {
+        if (compile.hasProperty('options') && isNotTestTask(compile, userConfig)) {
           // Check whether to use the Error Prone javac
           compile.options.annotationProcessorPath = project.configurations.checkerFramework
           if (needErrorProneJavac) {
@@ -204,5 +207,9 @@ final class CheckerFrameworkPlugin implements Plugin<Project> {
         }
       }
     }
+  }
+
+  private static boolean isNotTestTask(task, userConfig) {
+    return (!userConfig.excludeTests || !task.name.toLowerCase().contains("test"))
   }
 }
