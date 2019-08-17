@@ -37,6 +37,9 @@ final class CheckerFrameworkPlugin implements Plugin<Project> {
 
   private final static Logger LOG = Logging.getLogger(CheckerFrameworkPlugin)
 
+  private JavaVersion javaVersion
+  private Boolean shouldUseErrorProneJavac = null
+
   @Override void apply(Project project) {
     // Either get an existing CF config, or create a new one if none exists
     CheckerFrameworkExtension userConfig = project.extensions.findByType(CheckerFrameworkExtension.class)?:
@@ -125,14 +128,26 @@ final class CheckerFrameworkPlugin implements Plugin<Project> {
     }
   }
 
-  private static configureProject(Project project, CheckerFrameworkExtension userConfig) {
+  private configureProject(Project project, CheckerFrameworkExtension userConfig) {
+
+    JavaVersion javaVersion =
+            project.extensions.findByName('android')?.compileOptions?.sourceCompatibility ?:
+                    project.property('sourceCompatibility')
+
+    // Check Java version.
+    if (javaVersion.java7) {
+      throw new IllegalStateException("The Checker Framework does not support Java 7.")
+    }
+
+    this.javaVersion = javaVersion
+
     // Create a map of the correct configurations with dependencies
     def dependencyMap = [
-            [name: "${ANNOTATED_JDK_CONFIGURATION}", descripion: "${ANNOTATED_JDK_CONFIGURATION_DESCRIPTION}"]: "org.checkerframework:${ANNOTATED_JDK_NAME_JDK8}:${LIBRARY_VERSION}",
-            [name: "${CONFIGURATION}", descripion: "${ANNOTATED_JDK_CONFIGURATION_DESCRIPTION}"]              : "${CHECKER_DEPENDENCY}",
-            [name: "${JAVA_COMPILE_CONFIGURATION}", descripion: "${CONFIGURATION_DESCRIPTION}"]               : "${CHECKER_QUAL_DEPENDENCY}",
-            [name: "${TEST_COMPILE_CONFIGURATION}", descripion: "${CONFIGURATION_DESCRIPTION}"]               : "${CHECKER_QUAL_DEPENDENCY}",
-            [name: "errorProneJavac", descripion: "the Error Prone Java compiler"]                            : "com.google.errorprone:javac:9+181-r4173-1"
+            [name: "${ANNOTATED_JDK_CONFIGURATION}", description: "${ANNOTATED_JDK_CONFIGURATION_DESCRIPTION}"]: "org.checkerframework:${ANNOTATED_JDK_NAME_JDK8}:${LIBRARY_VERSION}",
+            [name: "${CONFIGURATION}", description: "${CONFIGURATION_DESCRIPTION}"]                            : "${CHECKER_DEPENDENCY}",
+            [name: "${JAVA_COMPILE_CONFIGURATION}"]                                                            : "${CHECKER_QUAL_DEPENDENCY}",
+            [name: "${TEST_COMPILE_CONFIGURATION}"]                                                            : "${CHECKER_QUAL_DEPENDENCY}",
+            [name: "errorProneJavac", description: "the Error Prone Java compiler"]                            : "com.google.errorprone:javac:9+181-r4173-1"
     ]
 
     // Now, apply the dependencies to project
@@ -144,7 +159,7 @@ final class CheckerFrameworkPlugin implements Plugin<Project> {
       } else {
         // If the user does not have the configuration, the plugin will create it
         project.configurations.create(configuration.name) { files ->
-          files.description = configuration.descripion
+          files.description = configuration.description
           files.visible = false
           files.defaultDependencies { dependencies ->
             dependencies.add(project.dependencies.create(dependency))
@@ -154,44 +169,40 @@ final class CheckerFrameworkPlugin implements Plugin<Project> {
     }
   }
 
-  private static applyToProject(Project project, CheckerFrameworkExtension userConfig) {
+  private boolean shouldUseErrorProneJavac(Project project, CheckerFrameworkExtension userConfig) {
 
-    JavaVersion javaVersion =
-            project.extensions.findByName('android')?.compileOptions?.sourceCompatibility ?:
-                    project.property('sourceCompatibility')
-
-    // Check Java version.
-    if (javaVersion.java7) {
-      throw new IllegalStateException("The Checker Framework does not support Java 7.")
+    if (this.shouldUseErrorProneJavac != null) {
+      return this.shouldUseErrorProneJavac.booleanValue()
     }
 
+    // Decide whether to use ErrorProne Javac once configurations have been populated.
+    def actualCFDependencySet = project.configurations.checkerFramework.getAllDependencies()
+            .matching({ dep ->
+      dep.getName().equals("checker") && dep.getGroup().equals("org.checkerframework")
+    })
+
+    def versionString
+
+    if (actualCFDependencySet.size() == 0) {
+      if (userConfig.skipVersionCheck) {
+        versionString = LIBRARY_VERSION
+      } else {
+        versionString = new JarFile(project.configurations.checkerFramework.asPath).getManifest().getMainAttributes().getValue('Implementation-Version')
+      }
+    } else {
+      // The call to iterator.next() is safe because we added this dependency above if it
+      // wasn't specified by the user.
+      versionString = actualCFDependencySet.iterator().next().getVersion()
+    }
+    // The array access is safe because all CF version strings have at least one . in them.
+    def isCFThreePlus = versionString.tokenize(".")[0].toInteger() >= 3
+    this.shouldUseErrorProneJavac = this.javaVersion.java8 && isCFThreePlus
+    return this.shouldUseErrorProneJavac.booleanValue()
+  }
+
+  private applyToProject(Project project, CheckerFrameworkExtension userConfig) {
     // Apply checker to project
     project.gradle.projectsEvaluated {
-
-      // Decide whether to use ErrorProne Javac once configurations have been populated.
-      def actualCFDependencySet = project.configurations.checkerFramework.getAllDependencies()
-              .matching({dep ->
-        dep.getName().equals("checker") && dep.getGroup().equals("org.checkerframework")})
-
-      def versionString
-
-      if (actualCFDependencySet.size() == 0) {
-        if (userConfig.skipVersionCheck) {
-          versionString = LIBRARY_VERSION
-        } else {
-          versionString = new JarFile(project.configurations.checkerFramework.asPath).getManifest().getMainAttributes().getValue('Implementation-Version')
-        }
-      } else {
-        // The call to iterator.next() is safe because we added this dependency above if it
-        // wasn't specified by the user.
-        versionString = actualCFDependencySet.iterator().next().getVersion()
-      }
-      // The array access is safe because all CF version strings have at least one . in them.
-      def isCFThreePlus = versionString.tokenize(".")[0].toInteger() >= 3
-
-      boolean needErrorProneJavac = javaVersion.java8 && isCFThreePlus
-
-
       project.tasks.withType(AbstractCompile).all { compile ->
         if (compile.hasProperty('options') && (!userConfig.excludeTests || !compile.name.toLowerCase().contains("test"))) {
           compile.options.annotationProcessorPath =
@@ -199,7 +210,7 @@ final class CheckerFrameworkPlugin implements Plugin<Project> {
                           project.configurations.checkerFramework :
                           project.configurations.checkerFramework.plus(compile.options.annotationProcessorPath)
             // Check whether to use the Error Prone javac
-            if (needErrorProneJavac) {
+            if (shouldUseErrorProneJavac(project, userConfig)) {
             compile.options.forkOptions.jvmArgs += [
               "-Xbootclasspath/p:${project.configurations.errorProneJavac.asPath}".toString()
             ]
